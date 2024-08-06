@@ -1,0 +1,123 @@
+- name: kubernetes install play
+  hosts: cluster
+  vars:
+    controlplane_IP: "172.16.0.201"
+    TOKEN: kdigit.1234567890hellow"
+    kube_config_dir: /etc/kubernetes
+  tasks:
+  - name: kernel module enable
+    modprobe:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - br_netfilter
+      - overlay
+  - name: sysctl config
+    sysctl:
+      name: "{{ item }}"
+      value: '1'
+      reload: yes
+      sysctl_file: /etc/sysctl.d/k8s.conf
+      state: present
+      sysctl_set: yes
+    loop:
+      - net.bridge.bridge-nf-call-ip6tables
+      - net.bridge.bridge-nf-call-iptables
+      - net.ipv4.ip_forward
+
+  - name: permissive selinux
+    ansible.posix.selinux:
+      policy: targeted
+      state: permissive
+
+  - name: firewalld disable
+    service:
+      name: firewalld
+      state: stopped
+      enabled: false
+
+  - name: remove swap
+    shell: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: remove swap from fstab
+    mount:
+      name: none
+      fstype: swap
+      state: absent
+
+  - name: Install docker repository
+    get_url:
+      url: https://download.docker.com/linux/centos/docker-ce.repo
+      dest: /etc/yum.repos.d/docker-ce.repo
+  
+  - name: Config k8s repository  
+    yum_repository:
+      name: k8s_repo 
+      description: k8s_ repo
+      baseurl: https://pkgs.k8s.io/core:/stable:/v1.30/rpm/
+      enabled: yes
+      gpgcheck: yes
+      repo_gpgcheck: yes
+      gpgkey:
+        - https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
+
+  - name: Install containerd and kubeadm
+    yum:
+      name: "{{ item }}"
+      state: latest
+    loop:
+      - containerd
+      - kubeadm
+      - kubelet
+
+  - name: copy container config file
+    copy:
+      src: config.toml
+      dest: /etc/containerd/config.toml
+
+  - name: enable service kubelet and cotainerd
+    service:
+      name: "{{ item }}"
+      state: started
+      enabled: true
+    loop:
+      - containerd
+      - kubelet
+
+  - name: copy /etc/hosts
+    copy:
+      src: /etc/hosts
+      dest: /etc/hosts
+
+  - name: Check if kubelet.conf exists
+    stat:
+      path: "{{ kube_config_dir }}/kubelet.conf"
+      get_attributes: no
+      get_checksum: no
+      get_mime: no
+    register: kubelet_conf
+
+  - name: init cluster
+    shell: |
+      kubeadm init --apiserver-advertise-address={{ controlplane_IP }} \
+                   --pod-network-cidr=192.168.0.0/16 \
+                   --token={{ TOKEN }}
+    when: inventory_hostname in groups['controlplanes'] and (not kubelet_conf.stat.exists)
+    ignore_errors: yes
+
+  - name: join cluster
+    shell: |
+      kubeadm join --token={{ TOKEN }} \
+                   --discovery-token-unsafe-skip-ca-verification \
+                   {{ controlplane_IP}}:6443
+    when: inventory_hostname in groups['worker_nodes'] and (not kubelet_conf.stat.exists)
+
+
+  - name: Copy admin config file from master
+    become: true
+    fetch:
+      src: /etc/kubernetes/admin.conf
+      dest: "{{ REMOTE_USER }}/.kube/config"
+      flat: yes
+    when: inventory_hostname in ['controlplane']

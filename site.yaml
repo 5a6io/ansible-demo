@@ -1,0 +1,15 @@
+- name: sample playbook
+  hosts: servera
+  tasks:
+  - name: first tasks
+    yum:
+      name: httpd
+      state: latest
+  - name: second tasks
+    service:
+      name: httpd
+      state: started
+  - name: third tasks
+    service:
+      name: firewalld
+      state: stopped
